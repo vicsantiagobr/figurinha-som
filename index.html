@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f1115">
+<title>Figurinha Som</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--tx:#e8eaf0;--mut:#8a90a0;--ac:#25d366;--bd:#2a2f3a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,-apple-system,sans-serif}
+main{max-width:520px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 14px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
+label{display:flex;justify-content:space-between;font-size:14px;color:var(--mut);margin:12px 0 4px}
+input[type=range]{width:100%;accent-color:var(--ac)}
+canvas,#outImg,#outVid{display:block;width:100%;aspect-ratio:1;border-radius:8px;object-fit:contain;
+  background:repeating-conic-gradient(#20232b 0 25%,#2a2e37 0 50%) 0 0/20px 20px}
+#vid{position:fixed;left:-9999px;top:0;width:2px;height:2px}
+button{width:100%;padding:14px;border:0;border-radius:10px;font-size:16px;font-weight:600;margin-top:10px;
+  background:var(--ac);color:#04210f;cursor:pointer}
+button.sec{background:#2a2f3a;color:var(--tx)}
+button:disabled{opacity:.4;cursor:default}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.seg{display:flex;gap:6px}
+.seg button{margin:0;padding:10px;background:#2a2f3a;color:var(--tx);font-weight:500}
+.seg button.on{background:var(--ac);color:#04210f}
+#status{font-size:14px;color:var(--mut);min-height:20px;margin-top:10px;white-space:pre-line}
+.hidden{display:none!important}
+.file{display:block;padding:22px;border:2px dashed var(--bd);border-radius:12px;text-align:center;color:var(--mut);cursor:pointer}
+.file input{display:none}
+.file b{color:var(--tx)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Figurinha Som</h1>
+
+  <div class="card">
+    <label class="file" id="drop"><input type="file" id="file" accept="video/*,image/gif"><b>Escolher vídeo</b><br>galeria ou câmera</label>
+  </div>
+
+  <div class="card hidden" id="ed">
+    <canvas id="cv" width="512" height="512"></canvas>
+    <label>Início <span id="startV">0.0 s</span></label>
+    <input type="range" id="start" min="0" max="0" step="0.1" value="0">
+    <label>Duração <span id="lenV">5.0 s</span></label>
+    <input type="range" id="len" min="0.5" max="10" step="0.1" value="5">
+    <label>Enquadramento</label>
+    <div class="seg"><button id="fFill" class="on">Preencher</button><button id="fFit">Inteiro</button></div>
+    <button class="sec" id="play">▶ Ouvir trecho</button>
+    <div class="row">
+      <button id="mkWebp">Figurinha</button>
+      <button id="mkMp4">Vídeo com som</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card hidden" id="out">
+    <img id="outImg" class="hidden" alt="">
+    <video id="outVid" class="hidden" controls playsinline loop></video>
+    <div id="outInfo" style="font-size:14px;color:var(--mut);margin-top:8px"></div>
+    <button id="share">Enviar para o WhatsApp</button>
+    <button class="sec" id="dl">Baixar</button>
+  </div>
+
+  <video id="vid" playsinline preload="auto"></video>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const S = 512;                 // lado exigido pelo WhatsApp
+const MAX_WEBP = 500 * 1024;   // limite figurinha animada
+const MAX_LEN = 10;            // segundos
+const vid = $('vid'), cv = $('cv'), cx = cv.getContext('2d');
+let srcUrl = null, fit = 'fill', result = null, busy = false, outUrl = null;
+
+const status = t => $('status').textContent = t;
+const fmtKB = n => (n / 1024).toFixed(0) + ' KB';
+
+/* ---------- carregar vídeo ---------- */
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (srcUrl) URL.revokeObjectURL(srcUrl);
+  srcUrl = URL.createObjectURL(f);
+  vid.src = srcUrl; vid.load();
+  status('Carregando…');
+};
+vid.onloadedmetadata = async () => {
+  const d = vid.duration;
+  if (!isFinite(d) || d <= 0) { status('Vídeo sem duração legível. Tente outro arquivo.'); return; }
+  $('ed').classList.remove('hidden');
+  $('len').max = Math.min(MAX_LEN, d).toFixed(1);
+  $('len').value = Math.min(+$('len').value, d).toFixed(1);
+  syncRanges();
+  await seek(+$('start').value); drawFrame();
+  status(vid.videoWidth + '×' + vid.videoHeight + ' · ' + d.toFixed(1) + ' s');
+};
+vid.onerror = () => status('Este navegador não abriu o vídeo. Tente MP4.');
+
+function syncRanges() {
+  const d = vid.duration, len = +$('len').value;
+  $('start').max = Math.max(0, d - len).toFixed(1);
+  if (+$('start').value > +$('start').max) $('start').value = $('start').max;
+  $('startV').textContent = (+$('start').value).toFixed(1) + ' s';
+  $('lenV').textContent = len.toFixed(1) + ' s';
+}
+$('start').oninput = async () => { syncRanges(); if (!busy) { await seek(+$('start').value); drawFrame(); } };
+$('len').oninput = syncRanges;
+$('fFill').onclick = () => setFit('fill');
+$('fFit').onclick = () => setFit('fit');
+function setFit(m) { fit = m; $('fFill').classList.toggle('on', m === 'fill'); $('fFit').classList.toggle('on', m === 'fit'); if (!busy) drawFrame(); }
+
+/* ---------- desenho ---------- */
+function drawFrame(bg) {
+  const vw = vid.videoWidth, vh = vid.videoHeight; if (!vw) return;
+  cx.clearRect(0, 0, S, S);
+  if (bg) { cx.fillStyle = bg; cx.fillRect(0, 0, S, S); }
+  const k = fit === 'fill' ? Math.max(S / vw, S / vh) : Math.min(S / vw, S / vh);
+  const w = vw * k, h = vh * k;
+  cx.drawImage(vid, (S - w) / 2, (S - h) / 2, w, h);
+}
+function seek(t) {
+  return new Promise(res => {
+    let done = false;
+    const fin = () => { if (done) return; done = true; vid.removeEventListener('seeked', fin); res(); };
+    vid.addEventListener('seeked', fin);
+    setTimeout(fin, 3000);
+    vid.currentTime = Math.min(t, Math.max(0, vid.duration - 0.001));
+  });
+}
+
+/* ---------- áudio (para ouvir e gravar) ---------- */
+let actx = null, asrc = null, adest = null;
+async function audioGraph() {
+  if (!actx) {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    asrc = actx.createMediaElementSource(vid);
+    adest = actx.createMediaStreamDestination();
+    asrc.connect(adest); asrc.connect(actx.destination);
+  }
+  await actx.resume();
+}
+
+/* toca o trecho desenhando no canvas; onFrame opcional */
+async function playSegment(bg) {
+  const start = +$('start').value, len = +$('len').value;
+  await audioGraph();
+  vid.muted = false;
+  await seek(start);
+  await vid.play();
+  await new Promise(res => {
+    const step = () => {
+      drawFrame(bg);
+      if (vid.currentTime >= start + len || vid.ended || vid.paused) { vid.pause(); res(); return; }
+      if (vid.requestVideoFrameCallback) vid.requestVideoFrameCallback(step); else requestAnimationFrame(step);
+    };
+    step();
+  });
+}
+
+$('play').onclick = async () => { if (busy) return; lock(true); status('Tocando…'); try { await playSegment(); status(''); } catch (e) { status('Erro: ' + e.message); } lock(false); };
+
+function lock(b) { busy = b; ['play', 'mkWebp', 'mkMp4', 'start', 'len', 'file'].forEach(id => $(id).disabled = b); }
+
+/* ---------- vídeo com som (MediaRecorder) ---------- */
+$('mkMp4').onclick = async () => {
+  if (busy) return; lock(true);
+  try {
+    const mime = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/mp4',
+      'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+    if (!mime) throw new Error('navegador sem gravação de vídeo');
+    await audioGraph();
+    await seek(+$('start').value); drawFrame('#000');
+    const vs = cv.captureStream(30);
+    const stream = new MediaStream([...vs.getVideoTracks(), ...adest.stream.getAudioTracks()]);
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 1500000, audioBitsPerSecond: 128000 });
+    const parts = []; rec.ondataavailable = e => e.data.size && parts.push(e.data);
+    const stopped = new Promise(r => rec.onstop = r);
+    status('Gravando ' + (+$('len').value).toFixed(1) + ' s…');
+    rec.start(250);
+    await playSegment('#000');
+    rec.stop(); await stopped;
+    vs.getTracks().forEach(t => t.stop());
+    const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm';
+    const blob = new Blob(parts, { type: mime.split(';')[0] });
+    showResult(blob, 'figurinha-som.' + ext, ext.toUpperCase() + ' · ' + fmtKB(blob.size) + ' · com som');
+    status('');
+  } catch (e) { status('Erro: ' + e.message); }
+  lock(false);
+};
+
+/* ---------- figurinha WebP animada ---------- */
+const toBlob = q => new Promise(r => cv.toBlob(r, 'image/webp', q));
+
+$('mkWebp').onclick = async () => {
+  if (busy) return; lock(true);
+  try {
+    const start = +$('start').value, len = Math.min(MAX_LEN, +$('len').value);
+    const BASE_FPS = 15, n = Math.max(1, Math.round(len * BASE_FPS));
+    // 1) captura frames em alta qualidade (blob webp pequeno em memória)
+    const frames = [];
+    for (let i = 0; i < n; i++) {
+      await seek(start + i / BASE_FPS); drawFrame();
+      const b = await toBlob(0.92);
+      if (!b || b.type !== 'image/webp') throw new Error('este navegador não gera WebP (use Chrome)');
+      frames.push(b);
+      status('Capturando ' + (i + 1) + '/' + n);
+    }
+    // 2) codifica com qualidade/fps decrescentes até caber em 500 KB
+    const tries = [[15, .75], [12, .65], [12, .5], [10, .45], [10, .35], [8, .3], [8, .22], [6, .18], [5, .12]];
+    let out = null;
+    for (const [fps, q] of tries) {
+      status('Comprimindo ' + fps + ' fps, qualidade ' + Math.round(q * 100) + '…');
+      out = await encodeAnim(frames, BASE_FPS, fps, q, len);
+      if (out.size <= MAX_WEBP) break;
+    }
+    if (out.size > MAX_WEBP) throw new Error('não coube em 500 KB (' + fmtKB(out.size) + '). Encurte a duração.');
+    showResult(out, 'figurinha.webp', 'WebP animado · 512×512 · ' + fmtKB(out.size) + ' · ' + len.toFixed(1) + ' s');
+    await seek(start); drawFrame();
+    status('');
+  } catch (e) { status('Erro: ' + e.message); }
+  lock(false);
+};
+
+async function encodeAnim(frames, baseFps, fps, q, len) {
+  const total = Math.round(len * 1000), count = Math.max(1, Math.round(len * fps));
+  const enc = [];
+  for (let i = 0; i < count; i++) {
+    const idx = Math.min(frames.length - 1, Math.round(i * baseFps / fps));
+    const bmp = await createImageBitmap(frames[idx]);
+    cx.clearRect(0, 0, S, S); cx.drawImage(bmp, 0, 0); bmp.close && bmp.close();
+    const b = await toBlob(q);
+    const t0 = Math.round(i * 1000 / fps), t1 = i === count - 1 ? total : Math.round((i + 1) * 1000 / fps);
+    enc.push({ buf: new Uint8Array(await b.arrayBuffer()), dur: Math.max(8, t1 - t0) });
+  }
+  return muxWebp(enc);
+}
+
+/* RIFF/WebP: VP8X + ANIM + ANMF(ALPH?, VP8/VP8L) */
+function readChunks(u) {
+  const dv = new DataView(u.buffer, u.byteOffset, u.byteLength), out = [];
+  let p = 12;
+  while (p + 8 <= u.length) {
+    const id = String.fromCharCode(u[p], u[p + 1], u[p + 2], u[p + 3]);
+    const sz = dv.getUint32(p + 4, true);
+    out.push({ id, data: u.subarray(p + 8, p + 8 + sz) });
+    p += 8 + sz + (sz & 1);
+  }
+  return out;
+}
+const le = (n, bytes) => { const a = []; for (let i = 0; i < bytes; i++) a.push((n >>> (8 * i)) & 255); return a; };
+function chunk(id, payload) {   // payload: Uint8Array
+  const pad = payload.length & 1;
+  const c = new Uint8Array(8 + payload.length + pad);
+  c.set([...id].map(ch => ch.charCodeAt(0)), 0);
+  c.set(le(payload.length, 4), 4);
+  c.set(payload, 8);
+  return c;
+}
+function concat(arrs) {
+  const n = arrs.reduce((s, a) => s + a.length, 0), o = new Uint8Array(n); let p = 0;
+  for (const a of arrs) { o.set(a, p); p += a.length; }
+  return o;
+}
+function muxWebp(frames) {
+  const body = [];
+  // VP8X: flags alpha(0x10)+animação(0x02), canvas 512x512
+  body.push(chunk('VP8X', new Uint8Array([0x12, 0, 0, 0, ...le(S - 1, 3), ...le(S - 1, 3)])));
+  // ANIM: fundo transparente, loop infinito
+  body.push(chunk('ANIM', new Uint8Array([0, 0, 0, 0, 0, 0])));
+  for (const f of frames) {
+    const sub = readChunks(f.buf).filter(c => c.id === 'ALPH' || c.id === 'VP8 ' || c.id === 'VP8L')
+      .map(c => chunk(c.id, c.data));
+    if (!sub.length) throw new Error('frame WebP inválido');
+    // x/2, y/2, w-1, h-1, duração, flags (não mistura, não descarta)
+    const hdr = new Uint8Array([...le(0, 3), ...le(0, 3), ...le(S - 1, 3), ...le(S - 1, 3), ...le(f.dur, 3), 0x02]);
+    body.push(chunk('ANMF', concat([hdr, ...sub])));
+  }
+  const payload = concat(body);
+  const head = new Uint8Array([82, 73, 70, 70, ...le(payload.length + 4, 4), 87, 69, 66, 80]); // RIFF....WEBP
+  return new Blob([head, payload], { type: 'image/webp' });
+}
+
+/* ---------- resultado ---------- */
+function showResult(blob, name, info) {
+  if (outUrl) URL.revokeObjectURL(outUrl);
+  outUrl = URL.createObjectURL(blob);
+  result = { blob, name };
+  const isImg = blob.type === 'image/webp';
+  $('outImg').classList.toggle('hidden', !isImg);
+  $('outVid').classList.toggle('hidden', isImg);
+  if (isImg) { $('outImg').src = outUrl; $('outVid').removeAttribute('src'); }
+  else { $('outVid').src = outUrl; $('outImg').removeAttribute('src'); }
+  $('outInfo').textContent = info;
+  $('out').classList.remove('hidden');
+  $('out').scrollIntoView({ behavior: 'smooth' });
+}
+$('share').onclick = async () => {
+  if (!result) return;
+  const f = new File([result.blob], result.name, { type: result.blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f] }); } catch (e) { if (e.name !== 'AbortError') status('Erro ao compartilhar: ' + e.message); }
+  } else { status('Este navegador não compartilha arquivo. Use Baixar.'); }
+};
+$('dl').onclick = () => {
+  if (!result) return;
+  const a = document.createElement('a'); a.href = outUrl; a.download = result.name;
+  document.body.appendChild(a); a.click(); a.remove();
+};
+</script>
+</body>
+</html>
